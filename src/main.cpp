@@ -2,12 +2,11 @@
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include <WiFiClientSecure.h>
-//#include <WiFiEspClient.h>
-//#include <WiFiEsp.h>
 #include <PubSubClient.h>
 #include <time.h>
-#include <SPI.h>
-#include <Wire.h>
+//#include <SPI.h>
+//#include <Wire.h>
+
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -20,78 +19,41 @@
 #include "esp_tls.h"
 #include "Base64.h"
 #include "mbedtls/base64.h"
-#include "soc/soc.h"           // Disable brownour problems
-#include "soc/rtc_cntl_reg.h"  // Disable brownour problems
+#include "soc/soc.h"           // Disable brownout problems
+#include "soc/rtc_cntl_reg.h"  // Disable brownout problems
 #include "driver/rtc_io.h"
 #include "camera_pins.h" // CAMERA_MODEL_AI_THINKER defined in camera_pins.h
-
 #include <Int64String.h>
 
-#include "ThingsBoard.h" // Include THingsBoard IoT lib for MQTT etc.
 
-#include <Adafruit_Sensor.h>
-//#include <Adafruit_I2CDevice.h>
-//#include <Adafruit_TSL2591.h>
-#include <DHT.h>
-#include <DHT_U.h>
-
-// See guide for details on sensor wiring and usage:
-// https://learn.adafruit.com/dht/overview
-// https://github.com/adafruit/DHT-sensor-library
-#define DHTTYPE DHT11     // DHT 11
-#define DHTPIN 13   // GPIO16 Digital pin connected to the DHT sensor 
-DHT dht(DHTPIN, DHTTYPE);
-DHT_Unified dht_u(DHTPIN, DHTTYPE);
-
-// I2C START Pin definition etc.
-#define I2C_SDA 14 // SDA Connected to GPIO 14
-#define I2C_SCL 15 // SCL Connected to GPIO 15
-#define I2C_CLOCK 100000 // 100000 = 100kHz, 400000 = 400kHz
-#define I2C_ADDR_TSL25911_LIGHT_SENSOR 0x29 // already defaulted to this so this define is not used
-#define I2C_ADDR__UV_SENSOR 0x29
-#define I2C_ADDR_OLED_SSD1306_128X64 0x3C
-//TwoWire i2cBus = TwoWire(0);
-//Adafruit_I2CDevice i2c_dev = Adafruit_I2CDevice();
-//Adafruit_TSL2591 tsl2591 = Adafruit_TSL2591(2591); // pass in a number for the sensor identifier (for your use later)
-// I2C END
-
-
-// AWS MQTT START
-#define AWS_MQTT_TOPIC_DHT11_SENSOR "hrcos82greenhouse-dht11"
-#define AWS_MQTT_TOPIC_LUX_SENSOR "hrcos82greenhouse-dht11"  // TODO 
-#define AWS_MQTT_TOPIC_OXYGEN_SENSOR "hrcos82greenhouse-dht11" // TODO 
-#define AWS_MQTT_TOPIC_WATER_SENSOR "hrcos82greenhouse-dht11" // TODO 
-// AWS MQTT END
+// AWS MQTT TOPICS
+#define AWS_MQTT_TOPIC_GREENHOUSE_SENSORS_LISTEN "hrcos82greenhouse_listen" // The greenhouse controller listens on this Topic for incoming messages
+#define AWS_MQTT_TOPIC_GREENHOUSE_SENSORS_SEND "hrcos82greenhouse_send" // The greenhouse controller sends messages on this Topic to AWS IOT Core
 
 #define CAMERA_MODEL_AI_THINKER // Has PSRAM
 #define DEFAULT_FRAMESIZE FRAMESIZE_UXGA
 
-
 #ifndef WIFI_SSID
 #define WIFI_SSID "MOBISOFT-2.4G"
 #define WIFI_PASS "1singapoer4"
+//#define WIFI_SSID "haywoodm-2.4G"
+//#define WIFI_PASS "54RM85M3"
 #endif
 
 // Initialize the WiFi Ethernet client object
-// WiFiEspClient espClient;
-//WiFiClient espClient;
 WiFiClientSecure espClient;
 
-// Initialize ThingsBoard instance
-ThingsBoard tb(espClient);
+// Initialize AWS Core MQTT instance
 PubSubClient awsMQTTClient(espClient); //  AWS MQTT Client
-
-char thingsboardServer[] = "thingsboard.markushaywood.net"; // "YOUR_THINGSBOARD_HOST_OR_IP";
-#define TOKEN "d3kS0YQsuLrxnCgrscO0"
 
 
 #define GMT_TIME_OFFSET 3600*2 // measure in seconds GMT+1 = 3600 GMT=2=3600*2
-#define GMT_TIME_DLS_OFFSET 0 // Day light savings offset i s0 for ZA
+#define GMT_TIME_DLS_OFFSET 0 // Day light savings offset is 0 for ZA
 #define TIME_ZONE "SAST-2,M3.5.0/02,M10.5.0/03" // Set with your time zone https://github.com/nayarsystems/posix_tz_db/blob/master/zones.csv
 
 #define S3_API_GW_BASEURL "https://vavi8xg2d2.execute-api.us-east-1.amazonaws.com/prod/"
 
-// Define the AWS CA Root certificate as we upload to AWS services
+// Define the AWS CA Root certificate to use when we communicate AWS services
 // https://docs.platformio.org/en/latest/platforms/espressif32.html#embedding-binary-data
 extern const uint8_t aws_root_ca_pem_start[] asm("_binary_src_certs_aws_root_ca_pem_start");
 extern const uint8_t aws_root_ca_pem_end[] asm("_binary_src_certs_aws_root_ca_pem_end");
@@ -103,18 +65,23 @@ extern const uint8_t private_pem_key_end[] asm("_binary_src_certs_private_pem_ke
 // WiFI credentials
 const char* ssid = WIFI_SSID;
 const char* password = WIFI_PASS;	
-const char* ntpServer = "pool.ntp.org"; //"time.google.com"; //
+const char* ntpServer = "pool.ntp.org"; //"time.google.com"; // NTP Time Server to use for time synch
 bool internet_connected = false;
-String MAC = ""; //String(WiFi.macAddress());
+String MAC = ""; // String(WiFi.macAddress());
 
-const char* mqtt_server = "a17cw65b0eoxkx-ats.iot.us-east-1.amazonaws.com"; // Relace with your MQTT END point
-const int   mqtt_port = 8883;
+const char* mqtt_server = "a17cw65b0eoxkx-ats.iot.us-east-1.amazonaws.com"; // MQTT endpoint to use for MQTT messaging
+const int   mqtt_port = 8883; // TCP port to use for MQTT messaging
 
 
-time_t now;    // this is the epoch
-tm timeInfo;         // the structure tm holds time information in a more convenient way
-String timeEpoch =  ""; //String(timeClient.getEpochTime());
-String timeEpochms =  ""; //String(timeClient.getEpochTime());
+#define CMD_RECIEVED_BUFFER_LENGTH 3072  // length of the Serial Command recieve buffer from RaspBerry Pi , 3kB
+char   cmdReceivedBuffer[CMD_RECIEVED_BUFFER_LENGTH];  // store the Serial CMD
+int16_t   cmdReceivedBufferIndex;
+
+
+time_t now;   // this is the epoch
+tm timeInfo;   // the structure tm holds time information in a more convenient way
+String timeEpoch =  ""; // String(timeClient.getEpochTime());
+String timeEpochms =  ""; // String(timeClient.getEpochTime());
 
 
 bool connect_wifi() {
@@ -149,7 +116,46 @@ bool connect_wifi() {
   Serial.println(F("---------------------------------------------------------------"));
   internet_connected = connected;
   return connected;
+} // connect_wifi()
+
+
+void callbackAWSMQTT(char* topic, byte* payload, unsigned int length) {
+  Serial.print(F("[MQTT Message arrived]:=>TOPIC:"));
+  Serial.print(topic);
+  Serial.print(":==>");
+  for (int i = 0; i < length; i++) {
+    Serial.print((char)payload[i]);
+  }
+  Serial.println();
 }
+
+void reconnectAWSMQTT() {
+ // Loop until we're reconnected
+  awsMQTTClient.setBufferSize(4096); // 4kb buffer size
+  while (!awsMQTTClient.connected()) {
+    Serial.print(F("Attempting AWS MQTT connection..."));
+    awsMQTTClient.setServer(mqtt_server, mqtt_port);
+    awsMQTTClient.setCallback(callbackAWSMQTT);
+    // Create a random client ID
+    String clientId = "ESP32-";
+    clientId += String(random(0xffff), HEX); // TODO, set more specific and controlled MQTT client id
+    // Attempt to connect
+    if (awsMQTTClient.connect(clientId.c_str())) {
+      Serial.println(F("AWS MQTT connected"));
+      // Once connected, publish an announcement...
+      awsMQTTClient.publish(AWS_MQTT_TOPIC_GREENHOUSE_SENSORS_SEND, "{\"HRCOS81Greeenhouse1\":\" AWS MQTT Reconnected!\"}");
+      // ... and resubscribe
+      awsMQTTClient.subscribe(AWS_MQTT_TOPIC_GREENHOUSE_SENSORS_LISTEN);
+    } else {
+      Serial.print(F("AWS MQTT connect Failed, rc="));
+      Serial.print(awsMQTTClient.state());
+      Serial.println(F(" try again in 5 seconds"));
+      // Wait 5 seconds before retrying
+      delay( 5000 );
+    }
+  }
+} // end reconnectAWSMQTT()
+
 
 void printESP32ChipInfo() {
   Serial.println();
@@ -174,9 +180,7 @@ void printESP32ChipInfo() {
 
 void restart_system() {
   Serial.println();
-  Serial.println(F("---------------------------------------------------------------"));
-  Serial.println("Restarting System now!");
-  Serial.println(F("---------------------------------------------------------------"));
+  Serial.println(F("[RESTARTING SYSTEM]"));
   Serial.println();
   if(internet_connected) WiFi.disconnect();
   fflush(stdout);
@@ -191,7 +195,7 @@ void cbSyncTime(struct timeval *tv)  // callback function to show when NTP was s
 // https://techtutorialsx.com/2021/09/01/esp32-system-time-and-sntp/
 // https://werner.rothschopf.net/microcontroller/202103_arduino_esp32_ntp_en.htm
 void sync_time_sntp() {
-  sntp_set_sync_interval(12 * 60 * 60 * 1000UL); // 12 hours
+  sntp_set_sync_interval(168 * 60 * 60 * 1000UL); // synch with NTP every 7 days = 168 hours
   sntp_set_time_sync_notification_cb(cbSyncTime);  // set a Callback function for time synchronization notification
   //configTime(GMT_TIME_OFFSET, GMT_TIME_DLS_OFFSET, ntpServer); we are using setenv so set to 0,0,ntpServer
   configTime(0, 0, ntpServer);
@@ -251,220 +255,24 @@ void printTime() {
 } // end printTime() 
 
 
-void dht_sensor_init() {
-  // Initialize device.
-  dht.begin();
-  // Set delay between sensor readings based on sensor details.
-  //delayMS = sensor.min_delay / 1000;
-} // end dht_sensor_init()
 
-void dht_sensor_info_print() {
+void sendTelemetry(String telemetryJSON) {
   Serial.println();
-  Serial.println(F("----------------------- dht_sensor_info_print ---------------------------"));
-  Serial.println(F("DHTxx Unified Sensor info print"));
-  // Print temperature sensor details.
-  sensor_adafruit_t sensor;
-  dht_u.temperature().getSensor(&sensor);
-  Serial.println(F("------------------------------------"));
-  Serial.println(F("Temperature Sensor"));
-  Serial.print  (F("Sensor Type: ")); Serial.println(sensor.name);
-  Serial.print  (F("Driver Ver:  ")); Serial.println(sensor.version);
-  Serial.print  (F("Unique ID:   ")); Serial.println(sensor.sensor_id);
-  Serial.print  (F("Max Value:   ")); Serial.print(sensor.max_value); Serial.println(F("°C"));
-  Serial.print  (F("Min Value:   ")); Serial.print(sensor.min_value); Serial.println(F("°C"));
-  Serial.print  (F("Resolution:  ")); Serial.print(sensor.resolution); Serial.println(F("°C"));
-  Serial.println(F("------------------------------------"));
-  // Print humidity sensor details.
-  dht_u.humidity().getSensor(&sensor);
-  Serial.println(F("Humidity Sensor"));
-  Serial.print  (F("Sensor Type: ")); Serial.println(sensor.name);
-  Serial.print  (F("Driver Ver:  ")); Serial.println(sensor.version);
-  Serial.print  (F("Unique ID:   ")); Serial.println(sensor.sensor_id);
-  Serial.print  (F("Max Value:   ")); Serial.print(sensor.max_value); Serial.println(F("%"));
-  Serial.print  (F("Min Value:   ")); Serial.print(sensor.min_value); Serial.println(F("%"));
-  Serial.print  (F("Resolution:  ")); Serial.print(sensor.resolution); Serial.println(F("%"));
-  Serial.println(F("---------------------------------------------------------------"));
-  Serial.println();
-} // end dht_sensor_info_print()
+  Serial.println(F("---------------- sendTelemetry to AWS IoT Core ----------------"));
 
-void dht_sensor_read_print() {
-  Serial.println();
-  Serial.println(F("----------------------- dht_sensor_read_print ---------------------------"));
-  Serial.println(F("DHTxx Unified Sensor read measurements and print"));
-
-  // Reading temperature or humidity takes about 250 milliseconds!
-  // Sensor readings may also be up to 2 seconds 'old' (its a very slow sensor)
-  float humidity = dht.readHumidity();
-  // Read temperature as Celsius (the default)
-  float temperature = dht.readTemperature();
-  float heatindex = -100.0;
-
-  // Check if any reads failed and exit early (to try again).
-  if (isnan(humidity) || isnan(temperature)) {
-    Serial.println(F("Failed to read from DHT sensor!"));
-    return;
-  }
-  else {
-    heatindex = dht.computeHeatIndex(temperature, humidity, false);
-    if(isnan(heatindex)) {
-      Serial.print(F("Failed to calculate Heat Index!"));
-    } else {
-      Serial.print(F("Heat Index: "));
-      Serial.print(heatindex);
-      Serial.println(F("°C"));
-      //if ( tb.connected() ) tb.sendTelemetryFloat("heatindex", heatindex);
-      // {"ts":1451649600512, "values":{"key1":"value1", "key2":"value2"}}
-      String telemetryJSON = "{\"ts\":"+ timeEpochms +", \"values\":{\"temperature\":\"" + temperature + "\", \"humidity\":\"" + humidity + "\", \"heatindex\":\"" + heatindex + "\"}}";
-      Serial.println("Sending MQTT sensor data :> " + telemetryJSON);
-      if ( tb.connected() ) tb.sendTelemetryJson(telemetryJSON.c_str());
-      if ( awsMQTTClient.connected() ) awsMQTTClient.publish(AWS_MQTT_TOPIC_DHT11_SENSOR, telemetryJSON.c_str());
-    }
+  if( !awsMQTTClient.connected() ) {
+    reconnectAWSMQTT(); // ensure AWS MQTT connection is active before sending telemetry, reconnect if not
   }
 
-  if (isnan(temperature)) {
-    Serial.println(F("Error reading temperature!"));
-  }
-  else {
-    Serial.print(F("Temperature: "));
-    Serial.print(temperature);
-    Serial.println(F("°C"));
-    //if ( tb.connected() ) tb.sendTelemetryFloat("temperature", temperature);
-  }
-  // Get humidity event and print its value.
-    if (isnan(humidity)) {
-    Serial.println(F("Error reading humidity!"));
-  }
-  else {
-    Serial.print(F("Humidity: "));
-    Serial.print(humidity);
-    Serial.println(F("%"));
-    //if ( tb.connected() ) tb.sendTelemetryFloat("humidity", humidity);
-  }
- 
-  Serial.println(F("---------------------------------------------------------------"));
-  Serial.println();  
-} // end dht_sensor_read_print()
-
-/*
-void displayTSL2591SensorDetails(void)
-{
-  Serial.println();
-  Serial.println(F("----------------------- displayTSL2591SensorDetails ---------------------------"));
-
-  sensor_adafruit_t sensor;
-  tsl2591.getSensor(&sensor);
-  Serial.println(F("------------------------------------"));
-  Serial.print  (F("Sensor:       ")); Serial.println(sensor.name);
-  Serial.print  (F("Driver Ver:   ")); Serial.println(sensor.version);
-  Serial.print  (F("Unique ID:    ")); Serial.println(sensor.sensor_id);
-  Serial.print  (F("Max Value:    ")); Serial.print(sensor.max_value); Serial.println(F(" lux"));
-  Serial.print  (F("Min Value:    ")); Serial.print(sensor.min_value); Serial.println(F(" lux"));
-  Serial.print  (F("Resolution:   ")); Serial.print(sensor.resolution, 4); Serial.println(F(" lux"));  
-  Serial.println(F("------------------------------------"));
-  Serial.println(F(""));
-  
-  Serial.println(F("---------------------------------------------------------------"));
-  Serial.println(); 
-}
-
-
-//    Configures the gain and integration time for the TSL2591
-void configureTSL2591Sensor(void)
-{
-  Serial.println();
-  Serial.println(F("------------------- configureTSL2591Sensor ---------------------"));
-
-  if (tsl2591.begin()) 
-  {
-    Serial.println(F("Found a TSL2591 sensor"));
-  } 
-  else 
-  {
-    Serial.println(F("No sensor found ... check your wiring?"));
-    while (1);
-  }
-  // You can change the gain on the fly, to adapt to brighter/dimmer light situations
-  //tsl.setGain(TSL2591_GAIN_LOW);    // 1x gain (bright light)
-  tsl2591.setGain(TSL2591_GAIN_MED);      // 25x gain
-  //tsl.setGain(TSL2591_GAIN_HIGH);   // 428x gain
-  
-  // Changing the integration time gives you a longer time over which to sense light
-  // longer timelines are slower, but are good in very low light situtations!
-  //tsl.setTiming(TSL2591_INTEGRATIONTIME_100MS);  // shortest integration time (bright light)
-  // tsl.setTiming(TSL2591_INTEGRATIONTIME_200MS);
-  tsl2591.setTiming(TSL2591_INTEGRATIONTIME_300MS);
-  // tsl.setTiming(TSL2591_INTEGRATIONTIME_400MS);
-  // tsl.setTiming(TSL2591_INTEGRATIONTIME_500MS);
-  // tsl.setTiming(TSL2591_INTEGRATIONTIME_600MS);  // longest integration time (dim light)
-
-  // Display the gain and integration time for reference sake   
-  Serial.println(F("------------------------------------"));
-  Serial.print  (F("Gain:         "));
-  tsl2591Gain_t gain = tsl2591.getGain();
-  switch(gain)
-  {
-    case TSL2591_GAIN_LOW:
-      Serial.println(F("1x (Low)"));
-      break;
-    case TSL2591_GAIN_MED:
-      Serial.println(F("25x (Medium)"));
-      break;
-    case TSL2591_GAIN_HIGH:
-      Serial.println(F("428x (High)"));
-      break;
-    case TSL2591_GAIN_MAX:
-      Serial.println(F("9876x (Max)"));
-      break;
-  }
-  Serial.print  (F("Timing:       "));
-  Serial.print((tsl2591.getTiming() + 1) * 100, DEC); 
-  Serial.println(F(" ms"));
-  Serial.println();
+  Serial.println("[AWS Sending MQTT sensor data ]:=> " + telemetryJSON);
+  if ( awsMQTTClient.connected() ) awsMQTTClient.publish(AWS_MQTT_TOPIC_GREENHOUSE_SENSORS_SEND, telemetryJSON.c_str());
 
   Serial.println(F("---------------------------------------------------------------"));
-  Serial.println(); 
-}
+  Serial.println();   
+} // sendTelemetry()
 
-//    Shows how to perform a basic read on visible, full spectrum or
-//    infrared light (returns raw 16-bit ADC values)
-void simpleReadTSL2591Sensor(void)
-{
-  Serial.println();
-  Serial.println(F("------------------- simpleReadTSL2591Sensor ---------------------"));
-  // Simple data read example. Just read the infrared, fullspecrtrum diode 
-  // or 'visible' (difference between the two) channels.
-  // This can take 100-600 milliseconds! Uncomment whichever of the following you want to read
-  uint16_t x = tsl2591.getLuminosity(TSL2591_VISIBLE);
-  //uint16_t x = tsl.getLuminosity(TSL2591_FULLSPECTRUM);
-  //uint16_t x = tsl.getLuminosity(TSL2591_INFRARED);
 
-  Serial.print(F("[ ")); Serial.print(millis()); Serial.print(F(" ms ] "));
-  Serial.print(F("Luminosity: "));
-  Serial.println(x, DEC);
-  Serial.println(F("---------------------------------------------------------------"));
-  Serial.println(); 
-}
 
-//    Show how to read IR and Full Spectrum at once and convert to lux
-void advancedReadTSL2591Sensor(void)
-{
-  Serial.println();
-  Serial.println(F("------------------- advancedReadTSL2591Sensor ---------------------"));
-  // More advanced data read example. Read 32 bits with top 16 bits IR, bottom 16 bits full spectrum
-  // That way you can do whatever math and comparisons you want!
-  uint32_t lum = tsl2591.getFullLuminosity();
-  uint16_t ir, full;
-  ir = lum >> 16;
-  full = lum & 0xFFFF;
-  Serial.print(F("[ ")); Serial.print(millis()); Serial.print(F(" ms ] "));
-  Serial.print(F("IR: ")); Serial.print(ir);  Serial.print(F("  "));
-  Serial.print(F("Full: ")); Serial.print(full); Serial.print(F("  "));
-  Serial.print(F("Visible: ")); Serial.print(full - ir); Serial.print(F("  "));
-  Serial.print(F("Lux: ")); Serial.println(tsl2591.calculateLux(full, ir), 6);
-  Serial.println(F("---------------------------------------------------------------"));
-  Serial.println(); 
-}
-*/
 
 void init_camera() {
   Serial.println();
@@ -497,11 +305,13 @@ void init_camera() {
     config.jpeg_quality = 10;
     config.fb_count = 2;
     Serial.printf("PSRAM was found");
+    Serial.println();
   } else {
     config.frame_size = FRAMESIZE_SVGA;
     config.jpeg_quality = 12;
     config.fb_count = 1;
     Serial.printf("PSRAM was NOT found");
+    Serial.println();
   }
 
   Serial.println();
@@ -600,11 +410,13 @@ esp_err_t _http_event_handler(esp_http_client_event_t *evt)
     case HTTP_EVENT_ON_HEADER:
       Serial.println();
       Serial.printf("HTTP_EVENT_ON_HEADER, key=%s, value=%s", evt->header_key, evt->header_value);
+      Serial.println();
       //ESP_LOGD(TAG, "HTTP_EVENT_ON_HEADER, key=%s, value=%s", evt->header_key, evt->header_value);
       break;
     case HTTP_EVENT_ON_DATA:
       Serial.println();
       Serial.printf("HTTP_EVENT_ON_DATA, len=%d", evt->data_len);
+      Serial.println();
       if (!esp_http_client_is_chunked_response(evt->client)) {
         // Write out data
         // printf("%.*s", evt->data_len, (char*)evt->data);
@@ -654,7 +466,7 @@ static esp_err_t take_send_photo() {
 
   String post_url2 = getS3UploadURL();
   Serial.print("S3_API_GW_URL : ");
-  Serial.print(post_url2);
+  Serial.println(post_url2);
   char post_url3[post_url2.length() + 1];
   post_url2.toCharArray(post_url3, sizeof(post_url3));
 
@@ -745,74 +557,58 @@ static esp_err_t take_send_photo() {
 } // end take_send_photo()
 
 
-void reconnectThingsBoard() {
-  // Loop until we're reconnected
-  while (!tb.connected()) {
-    Serial.print(F("Connecting to ThingsBoard node ..."));
-    // Attempt to connect (clientId, username, password)
-    if ( tb.connect(thingsboardServer, TOKEN) ) {
-      Serial.println(F("[DONE]"));
-    } else {
-      Serial.print(F("[FAILED]"));
-      Serial.println(F(" : retrying in 5 seconds"));
-      // Wait 5 seconds before retrying
-      delay( 5000 );
+String serialRxStr = Serial.readString();  //read until timeout
+
+byte cmdParse(String *pStr)
+{
+    byte modeIndex = 0;
+
+    if(pStr->startsWith("[MQTT send JSON]=:>")){
+        modeIndex = 1;
+        Serial.println("RECEIVED SERIAL CMD :==>" + *pStr);  
+        refreshTime(); // refresh time to ensure latest time is submitted with sensor readings
+        String jsonStr = "{\"ts\":"+ timeEpochms + ", \"tsp\":\""+ timeEpoch + "\"" +pStr->substring(25);  // inject the timestamp and strip of the command header to get the Telemetry JSON payload
+        Serial.println("RECEIVED SERIAL CMD :==>" + jsonStr);          
+        sendTelemetry(jsonStr); // 
+        take_send_photo(); // Take and Upload Photo to AWS S3 together with data metrics recieved from PICO
+    }else if(pStr->startsWith("[GET TIME EPOCH MS]=:>")){
+        modeIndex = 2;
+        Serial.println("[GET TIME EPOCH MS]=:>" + timeEpochms);  
+    }else if(pStr->startsWith("CALPH")){
+        modeIndex = 1;
     }
-  }
-} // reconnectThingsBoard()
+    return modeIndex;
 
-
-void callbackAWSMQTT(char* topic, byte* payload, unsigned int length) {
-  Serial.print(F("Message arrived ["));
-  Serial.print(topic);
-  Serial.print("] ");
-  for (int i = 0; i < length; i++) {
-    Serial.print((char)payload[i]);
-  }
-  Serial.println();
 }
 
-void reconnectAWSMQTT() {
- // Loop until we're reconnected
-  while (!awsMQTTClient.connected()) {
-    Serial.print(F("Attempting AWS MQTT connection..."));
-    awsMQTTClient.setServer(mqtt_server, mqtt_port);
-    awsMQTTClient.setCallback(callbackAWSMQTT);
-    // Create a random client ID
-    String clientId = "ESP32-";
-    clientId += String(random(0xffff), HEX); // TODO, set more specific and controlled MQTT client id
-    // Attempt to connect
-    if (awsMQTTClient.connect(clientId.c_str())) {
-      Serial.println(F("connected"));
-      // Once connected, publish an announcement...
-      awsMQTTClient.publish("ei_out", "HRCOS81Greeenhouse1 saying hello world!");
-      // ... and resubscribe
-      awsMQTTClient.subscribe("ei_in");
-    } else {
-      Serial.print(F("failed, rc="));
-      Serial.print(awsMQTTClient.state());
-      Serial.println(F(" try again in 5 seconds"));
-      // Wait 5 seconds before retrying
-      delay( 5000 );
-    }
+//void serialEvent() {
+void serialEventProcess() {  
+
+  if(Serial.available() > 0){
+    Serial.println();
+    Serial.println(F("---------------------- serialEvent --------------------------"));
+
+    serialRxStr = Serial.readString();  //read until timeout
+    serialRxStr.trim();  // remove any \r \n whitespace at the end of the String
+    Serial.println("serialRxStr :> " + serialRxStr);  
+    cmdParse(&serialRxStr);
+
+  Serial.println(F("---------------------------------------------------------------"));
+  Serial.println();  
+
   }
-} // end reconnectAWSMQTT()
 
+} // serialEvent()
 
-void i2c_setup() {
-  Wire.begin(I2C_SDA, I2C_SCL);
-  //Wire.begin(I2C_SDA, I2C_SCL, 100000);
-  //I2CSensors.begin(I2C_SDA, I2C_SCL, 100000);
-  //i2cBus.begin((int)I2C_SDA, (int)I2C_SCL, (uint32_t)I2C_CLOCK); 
-}
 
 void setup() {
   // put your setup code here, to run once:
   WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0); //disable brownout detector
 
   Serial.begin(115200); //  Start the serial port for terminal communication
+  Serial.setTimeout(1000); //  Serial read timeout 1000ms
 
-  printESP32ChipInfo(); // print the chip info
+  //printESP32ChipInfo(); // print the chip info
  
   connect_wifi(); // Connect to WiFi
 
@@ -820,15 +616,10 @@ void setup() {
 
   init_camera(); // Initialise the Camera
 
-  //pinMode(DHTPIN, INPUT_PULLUP);
-  dht_sensor_init(); // Initilaise the DHT11 Temperature and Humitiy sensor
-  dht_sensor_info_print();
-
-  //i2c_setup(); // setup i2c bus
-  //configureTSL2591Sensor(); // Initilaise TSL2591 Light Sensor
-  //displayTSL2591SensorDetails();
-
   // SD_MMC.begin("/sdcard", true) // https://randomnerdtutorials.com/esp32-cam-ai-thinker-pinout/
+
+  pinMode(4, OUTPUT);
+  digitalWrite(4, LOW);
 
 } // end setup()
 
@@ -836,33 +627,37 @@ void setup() {
 void loop() {
   // put your main code here, to run repeatedly:
 
-  vTaskDelay(30000 / portTICK_PERIOD_MS); // allow 30 seconds time for WiFi connect and time server sync etc. before starting main loop.
+  delay(30000); // allow 30 seconds time for WiFi connect and time server sync etc. before starting main loop.
 
-  for (int i = 288; i >= 0; i--) { // loop for 288 * 5 minutes = 24 hours and then reboot, just in case
-      //Serial.printf("Restarting in %d seconds...\n", i);
-      Serial.printf("Taking photo no: %d and sensor data reading in 5 minutes ...\n", i);
+  static unsigned long timepoint1 = millis(); // WiFi connect check and NTP time sync timeout
+  static unsigned long timepoint2 = timepoint1; // reboot time
+  while(true) {
+      if(millis()-timepoint1>300000U){  //time interval: 5 minutes
+        
+        timepoint1 = millis();
 
-      if ( !tb.connected() ) { // connect to THingsBoard if not connected yet
-        //reconnectThingsBoard(); // TODO, make secure connections to THingsBoard
-      }
+        if(WiFi.status() != WL_CONNECTED ){ // ensure WiFi is connected and reconnect if not
+          connect_wifi();
+        }
+
+        refreshTime(); // refresh time to ensure latest time is submitted with sensor readings
+        //printTime();
+        //take_send_photo();
+        //printTime();
+      } // timepoint1
+
+      if(millis()-timepoint2>86400000U){  //time interval: 24 hours        
+        timepoint2 = millis();        
+        restart_system(); // do a restart every 24 hours 
+      } // timepoint2
       
       if( !awsMQTTClient.connected() ) {
-        reconnectAWSMQTT(); // ensure AWS MQTT connection stay active
+          reconnectAWSMQTT(); // ensure AWS MQTT connection stay active
       }
 
-      refreshTime(); // refresh time to ensure latest time is submitted with sensor readings
-      dht_sensor_read_print();
-      //advancedReadTSL2591Sensor();
-      printTime();
-      take_send_photo();
-      printTime();
-
-      tb.loop(); // Loop the ThingsBoard API for procesing
+      serialEventProcess(); // Read Serial command and action it.
       awsMQTTClient.loop(); // Loop the AWS MQQT client APi for processing
-
-      vTaskDelay(300000 / portTICK_PERIOD_MS); // sleep for 5 minutes before taking next photo and sensor readings
   }
-  restart_system();
 
 } // end loop
 
